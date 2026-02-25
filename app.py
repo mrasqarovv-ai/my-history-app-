@@ -2,222 +2,134 @@ import streamlit as st
 from openai import OpenAI
 import base64
 from io import BytesIO
-from PIL import Image
 
 # ==========================================
-# 1. КОНФИГУРАЦИЯ СТРАНИЦЫ И UDL НАСТРОЙКИ
+# 1. КОНФИГУРАЦИЯ И UDL СТИЛИ
 # ==========================================
-st.set_page_config(
-    page_title="Доступная История", 
-    page_icon="🏛️", 
-    layout="centered"
-)
+st.set_page_config(page_title="Доступная История (Grok Edition)", page_icon="🏛️")
 
-# Боковая панель: Настройки доступности
-st.sidebar.title("Настройки")
-st.sidebar.markdown("Здесь можно настроить приложение так, как тебе удобно.")
+st.sidebar.title("⚙️ Настройки системы")
+font_size = st.sidebar.slider("Размер текста", 18, 32, 22)
 
-# UDL: Слайдер для изменения размера шрифта (поддержка слабовидящих и дислексии)
-font_size = st.sidebar.slider("Размер текста", min_value=18, max_value=32, value=22)
-
-# UDL: CSS-стилизация для крупных шрифтов и высокой контрастности
 st.markdown(f"""
     <style>
-    html, body, [class*="st-"] {{
-        font-size: {font_size}px !important;
-    }}
-    /* Высококонтрастные цвета для читаемости */
-    .stChatMessage {{
-        background-color: #f8f9fa;
-        border-radius: 10px;
-        padding: 10px;
-        margin-bottom: 10px;
-    }}
-    .stButton button {{
-        background-color: #0056b3;
-        color: white;
-        border-radius: 8px;
-        font-weight: bold;
-    }}
+    html, body, [class*="st-"] {{ font-size: {font_size}px !important; }}
+    .stChatMessage {{ background-color: #f0f2f6; border-radius: 15px; padding: 15px; }}
     </style>
 """, unsafe_allow_html=True)
 
-
 # ==========================================
-# 2. ИНИЦИАЛИЗАЦИЯ И БЕЗОПАСНОСТЬ (API KEYS)
+# 2. ИНИЦИАЛИЗАЦИЯ КЛИЕНТОВ (ГИБРИД)
 # ==========================================
-# Безопасное получение ключа (сначала из secrets, затем из интерфейса)
-api_key = st.secrets.get("OPENAI_API_KEY", "")
-if not api_key:
-    api_key = st.sidebar.text_input("🔑 Введи OpenAI API Key (для родителей/учителей)", type="password")
+# Получаем ключи из secrets или интерфейса
+openai_key = st.sidebar.text_input("🔑 OpenAI API Key (для голоса)", type="password", value=st.secrets.get("OPENAI_API_KEY", ""))
+grok_key = st.sidebar.text_input("🔑 Grok API Key (для ума)", type="password", value=st.secrets.get("GROK_API_KEY", ""))
 
-if not api_key:
-    st.info("Пожалуйста, попроси взрослого ввести ключ доступа (API Key) слева, чтобы мы могли начать!")
+if not openai_key or not grok_key:
+    st.warning("Для работы нужны оба ключа: OpenAI (голос) и Grok (текст/фото).")
     st.stop()
 
-client = OpenAI(api_key=api_key)
+# Клиент OpenAI для звука
+client_audio = OpenAI(api_key=openai_key)
 
+# Клиент Grok для текста и зрения (используем совместимый с OpenAI SDK)
+client_grok = OpenAI(
+    api_key=grok_key,
+    base_url="https://api.x.ai/v1",
+)
 
 # ==========================================
-# 3. ОСНОВНЫЕ ФУНКЦИИ (ИИ И МУЛЬТИМОДАЛЬНОСТЬ)
+# 3. ФУНКЦИИ-ПОМОЩНИКИ
 # ==========================================
+
 def encode_image(uploaded_file):
-    """Кодирует загруженное изображение в base64 для Vision API."""
-    bytes_data = uploaded_file.getvalue()
-    return base64.b64encode(bytes_data).decode('utf-8')
+    return base64.b64encode(uploaded_file.getvalue()).decode('utf-8')
 
 def transcribe_audio(audio_bytes):
-    """Транскрибирует голос ребенка в текст с помощью Whisper."""
+    """Используем OpenAI Whisper"""
     audio_file = BytesIO(audio_bytes)
     audio_file.name = "audio.wav"
-    transcript = client.audio.transcriptions.create(
-        model="whisper-1",
-        file=audio_file
-    )
+    transcript = client_audio.audio.transcriptions.create(model="whisper-1", file=audio_file)
     return transcript.text
 
 def generate_speech(text):
-    """Превращает текст ответа в понятную аудио-речь (TTS)."""
-    response = client.audio.speech.create(
-        model="tts-1",
-        voice="nova", # Голос Nova звучит мягко и дружелюбно
-        input=text
-    )
+    """Используем OpenAI TTS"""
+    response = client_audio.audio.speech.create(model="tts-1", voice="nova", input=text)
     return response.content
 
-def get_assistant_response(messages):
-    """Отправляет контекст диалога в GPT-4o."""
-    response = client.chat.completions.create(
-        model="gpt-4o",
+def get_grok_response(messages):
+    """Запрос к Grok-2-vision-latest"""
+    response = client_grok.chat.completions.create(
+        model="grok-2-vision-latest", # Или grok-vision-beta в зависимости от доступа
         messages=messages,
-        temperature=0.7 # Немного креативности, но без ухода от фактов
+        temperature=0.6
     )
     return response.choices[0].message.content
 
+# ==========================================
+# 4. ЛОГИКА ДИАЛОГА
+# ==========================================
 
-# ==========================================
-# 4. УПРАВЛЕНИЕ СОСТОЯНИЕМ (SESSION STATE)
-# ==========================================
-# UDL Промпт: Жесткие правила для ИИ, чтобы ответы были инклюзивными
 SYSTEM_PROMPT = """
-Ты — добрый, эмпатичный и терпеливый учитель истории. Твои ученики — дети с особыми образовательными потребностями.
-Твои правила общения (Universal Design for Learning):
-1. Plain Language: Используй очень простой язык.
-2. Короткие предложения: Максимум 10-12 слов в предложении.
-3. Никаких абстракций: Избегай метафор, сарказма и сложных дат, если о них не спрашивают. Объясняй через осязаемые примеры (например, "размером с автобус", "как твоя школа").
-4. Если тебе показывают картинку, сначала прямо скажи, что на ней, а потом расскажи один интересный исторический факт.
-5. Форматирование: Разделяй текст на короткие абзацы.
+Ты — добрый учитель истории. Твои ученики — дети.
+Пиши короткими предложениями. Используй простые слова.
+Если видишь картинку — объясни её просто и добавь один факт.
 """
 
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-if "processed_images" not in st.session_state:
-    st.session_state.processed_images = [] # Запоминаем отправленные фото
-if "last_audio" not in st.session_state:
-    st.session_state.last_audio = None
-
-
-# ==========================================
-# 5. ИНТЕРФЕЙС ПРИЛОЖЕНИЯ
-# ==========================================
-st.title("🏛️ Машина Времени")
-st.write("Привет! Я твой помощник. Мы можем изучать историю вместе. Напиши мне, скажи голосом или покажи картинку!")
-
-# Отображение истории переписки
+# Отображение чата
 for i, msg in enumerate(st.session_state.messages):
-    if msg["role"] == "system":
-        continue
-    
+    if msg["role"] == "system": continue
     with st.chat_message(msg["role"]):
-        # Обработка мультимодальных сообщений (где есть картинки и текст)
         if isinstance(msg["content"], list):
             for item in msg["content"]:
-                if item["type"] == "text":
-                    st.write(item["text"])
-                elif item["type"] == "image_url":
-                    # Показываем отправленное изображение
-                    st.image(item["image_url"]["url"])
+                if item["type"] == "text": st.write(item["text"])
+                elif item["type"] == "image_url": st.image(item["image_url"]["url"])
         else:
-            # Обычный текст
             st.write(msg["content"])
         
-        # UDL: Кнопка озвучки для каждого ответа ИИ
         if msg["role"] == "assistant":
-            # Используем уникальный ключ для каждой кнопки
-            if st.button("🔊 Озвучить ответ", key=f"tts_{i}"):
-                with st.spinner("Создаю звук..."):
-                    audio_data = generate_speech(msg["content"])
-                    # autoplay=True автоматически запустит аудио (работает в новых версиях Streamlit)
-                    st.audio(audio_data, format="audio/mp3", autoplay=True)
-
+            if st.button("🔊 Послушать ответ", key=f"audio_{i}"):
+                audio = generate_speech(msg["content"])
+                st.audio(audio, autoplay=True)
 
 # ==========================================
-# 6. ВВОД ДАННЫХ (ТЕКСТ, ГОЛОС, ФОТО)
+# 5. ВВОД (МУЛЬТИМОДАЛЬНОСТЬ)
 # ==========================================
-st.markdown("---")
 
-# Панель мультисенсорного ввода
-col1, col2 = st.columns([1, 1])
-with col1:
-    uploaded_image = st.file_uploader("🖼️ Покажи фото (положи в Машину Времени)", type=["png", "jpg", "jpeg"])
-with col2:
-    audio_value = st.audio_input("🎤 Задай вопрос голосом")
+img_file = st.file_uploader("🖼️ Загрузи фото", type=["jpg", "png"])
+voice_file = st.audio_input("🎤 Скажи что-нибудь")
+text_input = st.chat_input("⌨️ Напиши здесь...")
 
-user_text = st.chat_input("⌨️ Или напиши свой вопрос здесь...")
+input_text = None
+if text_input:
+    input_text = text_input
+elif voice_file:
+    with st.spinner("Распознаю голос..."):
+        input_text = transcribe_audio(voice_file.getvalue())
 
-# Логика обработки триггеров (когда пользователь отправляет запрос)
-trigger_text = None
-is_triggered = False
-
-if user_text:
-    trigger_text = user_text
-    is_triggered = True
-elif audio_value and audio_value != st.session_state.last_audio:
-    st.session_state.last_audio = audio_value
-    with st.spinner("Слушаю тебя..."):
-        trigger_text = transcribe_audio(audio_value.getvalue())
-        is_triggered = True
-
-# Если сработал триггер ввода (текст или голос)
-if is_triggered:
-    user_message_content = []
+if input_text or img_file:
+    new_content = []
     
-    # Добавляем текст/транскрипцию
-    if trigger_text:
-        user_message_content.append({"type": "text", "text": trigger_text})
+    if input_text:
+        new_content.append({"type": "text", "text": input_text})
     
-    # Проверяем, есть ли новое изображение
-    if uploaded_image and uploaded_image.file_id not in st.session_state.processed_images:
-        b64_img = encode_image(uploaded_image)
-        mime_type = uploaded_image.type
-        img_url = f"data:{mime_type};base64,{b64_img}"
-        
-        user_message_content.append({
+    if img_file:
+        b64_img = encode_image(img_file)
+        new_content.append({
             "type": "image_url",
-            "image_url": {"url": img_url}
+            "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}
         })
-        st.session_state.processed_images.append(uploaded_image.file_id)
-        
-        # Если ребенок загрузил фото, но ничего не написал/сказал
-        if not trigger_text:
-            user_message_content.append({"type": "text", "text": "Расскажи, что изображено на этой картинке?"})
+        if not input_text:
+            new_content.append({"type": "text", "text": "Что на этой картинке?"})
 
-    # 1. Сохраняем и показываем запрос ученика
-    st.session_state.messages.append({"role": "user", "content": user_message_content})
-    with st.chat_message("user"):
-        if trigger_text: 
-            st.write(trigger_text)
-        if uploaded_image and uploaded_image.file_id in st.session_state.processed_images:
-            st.image(uploaded_image)
-
-    # 2. Получаем и показываем ответ ИИ
+    st.session_state.messages.append({"role": "user", "content": new_content})
+    
     with st.chat_message("assistant"):
-        with st.spinner("Думаю..."):
-            ai_reply = get_assistant_response(st.session_state.messages)
-            st.write(ai_reply)
-            # Сохраняем ответ как обычный текст
-            st.session_state.messages.append({"role": "assistant", "content": ai_reply})
-            
-            # Перезагружаем интерфейс, чтобы появилась кнопка "Озвучить"
+        with st.spinner("Grok изучает историю..."):
+            reply = get_grok_response(st.session_state.messages)
+            st.write(reply)
+            st.session_state.messages.append({"role": "assistant", "content": reply})
             st.rerun()
